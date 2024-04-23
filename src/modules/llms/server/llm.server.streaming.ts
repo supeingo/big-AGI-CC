@@ -152,7 +152,7 @@ export async function llmStreamingRelayHandler(req: NextRequest): Promise<Respon
    * NOTE: we have not benchmarked to see if there is performance impact by using this approach - we do want to have
    * a 'healthy' level of inventory (i.e., pre-buffering) on the pipe to the client.
    */
-  const transformUpstreamToBigAgiClient = createEventStreamTransformer(
+  const transformUpstreamToBigAgiClient = createUpStreamTransformer(
     muxingFormat, vendorStreamParser, access.dialect,
   );
 
@@ -172,10 +172,15 @@ export async function llmStreamingRelayHandler(req: NextRequest): Promise<Respon
 // Event Stream Transformers
 
 /**
+ * The default demuxer for EventSource upstreams.
+ */
+const _createDemuxerEventsource: (onParse: EventSourceParseCallback) => EventSourceParser = createEventsourceParser;
+
+/**
  * Creates a parser for a 'JSON\n' non-event stream, to be swapped with an EventSource parser.
  * Ollama is the only vendor that uses this format.
  */
-function createDemuxerJsonNewline(onParse: EventSourceParseCallback): EventSourceParser {
+function _createDemuxerJsonNewline(onParse: EventSourceParseCallback): EventSourceParser {
   let accumulator: string = '';
   return {
     // feeds a new chunk to the parser - we accumulate in case of partial data, and only execute on full lines
@@ -206,7 +211,7 @@ function createDemuxerJsonNewline(onParse: EventSourceParseCallback): EventSourc
  * Creates a TransformStream that parses events from an EventSource stream using a custom parser.
  * @returns {TransformStream<Uint8Array, string>} TransformStream parsing events.
  */
-function createEventStreamTransformer(muxingFormat: MuxingFormat, vendorTextParser: AIStreamParser, dialectLabel: string): TransformStream<Uint8Array, Uint8Array> {
+function createUpStreamTransformer(muxingFormat: MuxingFormat, vendorTextParser: AIStreamParser, dialectLabel: string): TransformStream<Uint8Array, Uint8Array> {
   const textDecoder = new TextDecoder();
   const textEncoder = new TextEncoder();
   let eventSourceParser: EventSourceParser;
@@ -255,9 +260,9 @@ function createEventStreamTransformer(muxingFormat: MuxingFormat, vendorTextPars
       };
 
       if (muxingFormat === 'sse')
-        eventSourceParser = createEventsourceParser(onNewEvent);
+        eventSourceParser = _createDemuxerEventsource(onNewEvent);
       else if (muxingFormat === 'json-nl')
-        eventSourceParser = createDemuxerJsonNewline(onNewEvent);
+        eventSourceParser = _createDemuxerJsonNewline(onNewEvent);
     },
 
     // stream=true is set because the data is not guaranteed to be final and un-chunked
