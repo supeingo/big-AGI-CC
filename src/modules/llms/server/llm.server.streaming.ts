@@ -2,7 +2,7 @@ import { z } from 'zod';
 import { NextRequest, NextResponse } from 'next/server';
 import { createParser as createEventsourceParser, EventSourceParseCallback, EventSourceParser, ParsedEvent, ReconnectInterval } from 'eventsource-parser';
 
-import { createEmptyReadableStream, debugGenerateCurlCommand, nonTrpcServerFetchOrThrow, safeErrorString, SERVER_DEBUG_WIRE, serverCapitalizeFirstLetter, ServerFetchError } from '~/server/wire';
+import { createEmptyReadableStream, debugGenerateCurlCommand, nonTrpcServerFetchOrThrow, safeErrorString, SERVER_DEBUG_WIRE, serverCapitalizeFirstLetter } from '~/server/wire';
 
 
 // Anthropic server imports
@@ -19,7 +19,7 @@ import { OLLAMA_PATH_CHAT, ollamaAccess, ollamaAccessSchema, ollamaChatCompletio
 
 // OpenAI server imports
 import type { OpenAIWire } from './openai/openai.wiretypes';
-import { openAIAccess, openAIAccessSchema, openAIChatCompletionPayload, openAIHistorySchema, openAIModelSchema } from './openai/openai.router';
+import { openAIAccess, openAIAccessSchema, openAIChatCompletionPayload, OpenAIHistorySchema, openAIHistorySchema, OpenAIModelSchema, openAIModelSchema } from './openai/openai.router';
 
 
 // configuration
@@ -70,97 +70,88 @@ export type ChatStreamingPreambleModelSchema = z.infer<typeof chatStreamingFirst
 
 export async function llmStreamingRelayHandler(req: NextRequest): Promise<Response> {
 
-  // inputs - reuse the tRPC schema
+  // Parse the request
   const body = await req.json();
   const { access, model, history } = chatStreamingInputSchema.parse(body);
+  const prettyDialect = serverCapitalizeFirstLetter(access.dialect);
 
-  // access/dialect dependent setup:
-  //  - requestAccess: the headers and URL to use for the upstream API call
-  //  - muxingFormat: the format of the event stream (sse or json-nl)
-  //  - vendorStreamParser: the parser to use for the event stream
-  let upstreamResponse: Response;
-  let requestAccess: { headers: HeadersInit, url: string } = { headers: {}, url: '' };
-  let muxingFormat: MuxingFormat = 'sse';
-  let vendorStreamParser: AIStreamParser;
+
+  // Prepare the upstream API request and demuxer/parser
+  let requestData: ReturnType<typeof _prepareRequestData>;
   try {
-
-    // prepare the API request data
-    let body: object;
-    switch (access.dialect) {
-      case 'anthropic':
-        requestAccess = anthropicAccess(access, '/v1/messages');
-        body = anthropicMessagesPayloadOrThrow(model, history, true);
-        vendorStreamParser = createStreamParserAnthropicMessages();
-        break;
-
-      case 'gemini':
-        requestAccess = geminiAccess(access, model.id, geminiModelsStreamGenerateContentPath);
-        body = geminiGenerateContentTextPayload(model, history, access.minSafetyLevel, 1);
-        vendorStreamParser = createStreamParserGemini(model.id.replace('models/', ''));
-        break;
-
-      case 'ollama':
-        requestAccess = ollamaAccess(access, OLLAMA_PATH_CHAT);
-        body = ollamaChatCompletionPayload(model, history, true);
-        muxingFormat = 'json-nl';
-        vendorStreamParser = createStreamParserOllama();
-        break;
-
-      case 'azure':
-      case 'groq':
-      case 'lmstudio':
-      case 'localai':
-      case 'mistral':
-      case 'oobabooga':
-      case 'openai':
-      case 'openrouter':
-      case 'perplexity':
-      case 'togetherai':
-        requestAccess = openAIAccess(access, model.id, '/v1/chat/completions');
-        body = openAIChatCompletionPayload(access.dialect, model, history, null, null, 1, true);
-        vendorStreamParser = createStreamParserOpenAI();
-        break;
-    }
-
-    if (SERVER_DEBUG_WIRE)
-      console.log('-> streaming:', debugGenerateCurlCommand('POST', requestAccess.url, requestAccess.headers, body));
-
-    // POST to our API route
-    upstreamResponse = await nonTrpcServerFetchOrThrow(requestAccess.url, 'POST', requestAccess.headers, body);
-
+    requestData = _prepareRequestData(access, model, history);
   } catch (error: any) {
-
-    // server-side admins message
-    const capDialect = serverCapitalizeFirstLetter(access.dialect);
-    const fetchOrVendorError = safeErrorString(error) + (error?.cause ? ' · ' + JSON.stringify(error.cause) : '');
-    console.error(`[POST] /api/llms/stream: ${capDialect}: fetch issue:`, fetchOrVendorError, requestAccess?.url);
-
-    // client-side users visible message
-    const statusCode = ((error instanceof ServerFetchError) && (error.statusCode >= 400)) ? error.statusCode : 422;
-    const devMessage = process.env.NODE_ENV === 'development' ? ` [DEV_URL: ${requestAccess?.url}]` : '';
-    return new NextResponse(`**[Service Issue] ${capDialect}**: ${fetchOrVendorError}${devMessage}`, {
-      status: statusCode,
+    console.error(`[POST] /api/llms/stream: ${prettyDialect}: prepareRequestData issue:`, safeErrorString(error));
+    return new NextResponse(`**[Service Issue] ${prettyDialect}**: ${safeErrorString(error) || 'Unknown streaming error'}`, {
+      status: 422,
     });
   }
 
-  /* The following code is heavily inspired by the Vercel AI SDK, but simplified to our needs and in full control.
-   * This replaces the former (custom) implementation that used to return a ReadableStream directly, and upon start,
-   * it was blindly fetching the upstream response and piping it to the client.
-   *
-   * We now use backpressure, as explained on: https://sdk.vercel.ai/docs/concepts/backpressure-and-cancellation
-   *
-   * NOTE: we have not benchmarked to see if there is performance impact by using this approach - we do want to have
-   * a 'healthy' level of inventory (i.e., pre-buffering) on the pipe to the client.
-   */
-  const transformUpstreamToBigAgiClient = createUpStreamTransformer(
-    muxingFormat, vendorStreamParser, access.dialect,
-  );
 
-  const chatResponseStream =
-    (upstreamResponse.body || createEmptyReadableStream())
-      .pipeThrough(transformUpstreamToBigAgiClient);
+  // Create the downstream stream
+  const downStream = new ReadableStream({
 
-  return new NextResponse(chatResponseStream, {
+    async start(controller) {
+
+      let controllerClosed = false;
+
+      // Send initial packet indicating the start of the stream
+      const dsTextEncoder = new TextEncoder();
+
+      function dsAppendText(text: string) {
+        controller.enqueue(dsTextEncoder.encode(text));
+      }
+
+      const startPacket: ChatStreamingPreambleStartSchema = { type: 'start' };
+      dsAppendText(JSON.stringify(startPacket));
+
+
+      // Asynchronously fetch and process the upstream data
+      nonTrpcServerFetchOrThrow(requestData.url, 'POST', requestData.headers, requestData.body).then(async (upstreamResponse) => {
+
+        const transformUpstreamToBigAgiClient = createUpStreamTransformer(
+          requestData.vendorMuxingFormat, requestData.vendorStreamParser, access.dialect,
+        );
+
+        const chatResponseStream =
+          (upstreamResponse.body || createEmptyReadableStream())
+            .pipeThrough(transformUpstreamToBigAgiClient);
+
+        // asynchronous fetch
+        if (SERVER_DEBUG_WIRE)
+          console.log('-> streaming:', debugGenerateCurlCommand('POST', requestData.url, requestData.headers, requestData.body));
+
+        // Can we replace this loop so we can use backpropagation instead?
+        const reader = chatResponseStream.getReader();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done || controllerClosed) break;
+          controller.enqueue(value);
+        }
+        if (!controllerClosed) {
+          controllerClosed = true;
+          controller.close();
+        }
+
+      }).catch((error) => {
+
+        // create an error message to the client, just text for now
+        const fetchOrVendorError = safeErrorString(error) + (error?.cause ? ' · ' + JSON.stringify(error.cause) : '');
+        const devMessage = process.env.NODE_ENV === 'development' ? ` [DEV_URL: ${requestData?.url}]` : '';
+        // const statusCode = ((error instanceof ServerFetchError) && (error.statusCode >= 400)) ? error.statusCode : 422;
+
+        // server-side admins message
+        console.error(`[POST] /api/llms/stream: ${prettyDialect}: fetch issue:`, fetchOrVendorError, requestData?.url);
+        dsAppendText(`**[Service Issue] ${prettyDialect}**: ${fetchOrVendorError}${devMessage}`);
+        if (!controllerClosed) {
+          controller.close();
+          controllerClosed = true;
+        }
+      });
+    },
+  });
+
+  return new NextResponse(downStream, {
     status: 200,
     headers: {
       'Content-Type': 'text/event-stream; charset=utf-8',
@@ -219,10 +210,6 @@ function createUpStreamTransformer(muxingFormat: MuxingFormat, vendorTextParser:
 
   return new TransformStream({
     start: async (controller): Promise<void> => {
-
-      // Send initial packet indicating the start of the stream
-      const startPacket: ChatStreamingPreambleStartSchema = { type: 'start' };
-      controller.enqueue(textEncoder.encode(JSON.stringify(startPacket)));
 
       // only used for debugging
       let debugLastMs: number | null = null;
@@ -511,4 +498,55 @@ function createStreamParserOpenAI(): AIStreamParser {
     const close = !!json.choices[0].finish_reason;
     return { text, close };
   };
+}
+
+function _prepareRequestData(access: ChatStreamingInputSchema['access'], model: OpenAIModelSchema, history: OpenAIHistorySchema): {
+  headers: HeadersInit;
+  url: string;
+  body: object;
+  vendorMuxingFormat: MuxingFormat;
+  vendorStreamParser: AIStreamParser;
+} {
+  switch (access.dialect) {
+    case 'anthropic':
+      return {
+        ...anthropicAccess(access, '/v1/messages'),
+        body: anthropicMessagesPayloadOrThrow(model, history, true),
+        vendorMuxingFormat: 'sse',
+        vendorStreamParser: createStreamParserAnthropicMessages(),
+      };
+
+    case 'gemini':
+      return {
+        ...geminiAccess(access, model.id, geminiModelsStreamGenerateContentPath),
+        body: geminiGenerateContentTextPayload(model, history, access.minSafetyLevel, 1),
+        vendorMuxingFormat: 'sse',
+        vendorStreamParser: createStreamParserGemini(model.id.replace('models/', '')),
+      };
+
+    case 'ollama':
+      return {
+        ...ollamaAccess(access, OLLAMA_PATH_CHAT),
+        body: ollamaChatCompletionPayload(model, history, true),
+        vendorMuxingFormat: 'json-nl',
+        vendorStreamParser: createStreamParserOllama(),
+      };
+
+    case 'azure':
+    case 'groq':
+    case 'lmstudio':
+    case 'localai':
+    case 'mistral':
+    case 'oobabooga':
+    case 'openai':
+    case 'openrouter':
+    case 'perplexity':
+    case 'togetherai':
+      return {
+        ...openAIAccess(access, model.id, '/v1/chat/completions'),
+        body: openAIChatCompletionPayload(access.dialect, model, history, null, null, 1, true),
+        vendorMuxingFormat: 'sse',
+        vendorStreamParser: createStreamParserOpenAI(),
+      };
+  }
 }
