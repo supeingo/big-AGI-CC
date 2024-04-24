@@ -68,6 +68,7 @@ import { ButtonOptionsDraw } from './buttons/ButtonOptionsDraw';
 import { ChatModeMenu } from './ChatModeMenu';
 import { TokenBadgeMemo } from './TokenBadge';
 import { TokenProgressbarMemo } from './TokenProgressbar';
+import { _executeConversationImagineText } from '../../editors/_executeConversation';
 import { useComposerStartupText } from './store-composer';
 
 
@@ -102,7 +103,6 @@ export function Composer(props: {
   isMulticast: boolean | null;
   isDeveloperMode: boolean;
   onAction: (conversationId: DConversationId, chatModeId: ChatModeId, multiPartMessage: ComposerOutputMultiPart) => boolean;
-  onTextImagine: (conversationId: DConversationId, text: string) => void;
   setIsMulticast: (on: boolean) => void;
   sx?: SxProps;
 }) {
@@ -232,7 +232,7 @@ export function Composer(props: {
   const handleTextImagineClicked = React.useCallback(() => {
     if (!composeText || !props.conversationId)
       return;
-    props.onTextImagine(props.conversationId, composeText);
+    void _executeConversationImagineText(props.conversationId, composeText);
     setComposeText('');
   }, [composeText, props, setComposeText]);
 

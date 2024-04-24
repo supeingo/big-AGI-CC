@@ -10,7 +10,6 @@ import { FlattenerModal } from '~/modules/aifn/flatten/FlattenerModal';
 import { TradeConfig, TradeModal } from '~/modules/trade/TradeModal';
 import { downloadConversation, openAndLoadConversations } from '~/modules/trade/trade.client';
 import { getChatLLMId, useChatLLM } from '~/modules/llms/store-llms';
-import { imaginePromptFromText } from '~/modules/aifn/imagine/imaginePromptFromText';
 import { speakText } from '~/modules/elevenlabs/elevenlabs.client';
 import { useAreBeamsOpen } from '~/modules/beam/store-beam.hooks';
 import { useCapabilityTextToImage } from '~/modules/t2i/t2i.client';
@@ -22,7 +21,7 @@ import { PanelResizeInset } from '~/common/components/panes/GoodPanelResizeHandl
 import { ScrollToBottom } from '~/common/scroll-to-bottom/ScrollToBottom';
 import { ScrollToBottomButton } from '~/common/scroll-to-bottom/ScrollToBottomButton';
 import { addSnackbar, removeSnackbar } from '~/common/components/useSnackbarsStore';
-import { createDMessage, DConversationId, DMessage, getConversation, getConversationSystemPurposeId, useConversation } from '~/common/state/store-chats';
+import { createDMessage, DConversationId, getConversation, getConversationSystemPurposeId, useConversation } from '~/common/state/store-chats';
 import { themeBgAppChatComposer } from '~/common/app.theme';
 import { useFolderStore } from '~/common/state/store-folders';
 import { useIsMobile } from '~/common/components/useMatchMedia';
@@ -42,7 +41,7 @@ import { ChatPageMenuItems } from './components/ChatPageMenuItems';
 import { Composer } from './components/composer/Composer';
 import { usePanesManager } from './components/panes/usePanesManager';
 
-import { _handleExecute } from './editors/_handleExecute';
+import { _executeConversationGenerateText, _executeState } from './editors/_executeConversation';
 
 
 // what to say when a chat is new and has no title
@@ -217,29 +216,25 @@ export function AppChat() {
     if (willMulticast)
       chatPanes.forEach(pane => pane.conversationId && uniqueConversationIds.add(pane.conversationId));
 
-    // we loop to handle both the normal and multicast modes
+    // execute on single/multi conversations
     let enqueued = false;
     for (const _cId of uniqueConversationIds) {
       const _conversation = getConversation(_cId);
       if (_conversation) {
         // start execution fire/forget
-        void _handleExecute(chatModeId, _cId, [..._conversation.messages, createDMessage('user', userText)]);
+        void _executeState(chatModeId, _cId, [..._conversation.messages, createDMessage('user', userText)]);
         enqueued = true;
       }
     }
     return enqueued;
   }, [chatPanes, willMulticast]);
 
-  const handleConversationExecuteHistory = React.useCallback(async (conversationId: DConversationId, history: DMessage[]): Promise<void> => {
-    await _handleExecute('generate-text', conversationId, history);
-  }, []);
-
   const handleMessageRegenerateLastInFocusedPane = React.useCallback(async () => {
     const focusedConversation = getConversation(focusedPaneConversationId);
     if (focusedConversation?.messages?.length) {
       const lastMessage = focusedConversation.messages[focusedConversation.messages.length - 1];
       const history = lastMessage.role === 'assistant' ? focusedConversation.messages.slice(0, -1) : [...focusedConversation.messages];
-      return await _handleExecute('generate-text', focusedConversation.id, history);
+      return await _executeConversationGenerateText(focusedConversation.id, history);
     }
   }, [focusedPaneConversationId]);
 
@@ -256,17 +251,6 @@ export function AppChat() {
   }, [focusedPaneConversationId]);
 
   const handleTextDiagram = React.useCallback((diagramConfig: DiagramConfig | null) => setDiagramConfig(diagramConfig), []);
-
-  const handleTextImagine = React.useCallback(async (conversationId: DConversationId, messageText: string): Promise<void> => {
-    const conversation = getConversation(conversationId);
-    if (!conversation)
-      return;
-    const imaginedPrompt = await imaginePromptFromText(messageText) || 'An error sign.';
-    return await _handleExecute('generate-image', conversationId, [
-      ...conversation.messages,
-      createDMessage('user', imaginedPrompt),
-    ]);
-  }, []);
 
   const handleTextSpeak = React.useCallback(async (text: string): Promise<void> => {
     await speakText(text);
@@ -523,9 +507,7 @@ export function AppChat() {
                   isMessageSelectionMode={isMessageSelectionMode}
                   setIsMessageSelectionMode={setIsMessageSelectionMode}
                   onConversationBranch={handleConversationBranch}
-                  onConversationExecuteHistory={handleConversationExecuteHistory}
                   onTextDiagram={handleTextDiagram}
-                  onTextImagine={handleTextImagine}
                   onTextSpeak={handleTextSpeak}
                   sx={{
                     flexGrow: 1,
@@ -572,7 +554,6 @@ export function AppChat() {
       isMulticast={!isMultiConversationId ? null : isComposerMulticast}
       isDeveloperMode={isFocusedChatDeveloper}
       onAction={handleComposerAction}
-      onTextImagine={handleTextImagine}
       setIsMulticast={setIsComposerMulticast}
       sx={beamOpenStoreInFocusedPane ? composerClosedSx : composerOpenSx}
     />

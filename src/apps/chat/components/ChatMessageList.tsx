@@ -10,7 +10,7 @@ import type { ConversationHandler } from '~/common/chats/ConversationHandler';
 import { InlineError } from '~/common/components/InlineError';
 import { PreferencesTab, useOptimaLayout } from '~/common/layout/optima/useOptimaLayout';
 import { ShortcutKeyName, useGlobalShortcut } from '~/common/components/useGlobalShortcut';
-import { createDMessage, DConversationId, DMessage, DMessageUserFlag, getConversation, messageToggleUserFlag, useChatStore } from '~/common/state/store-chats';
+import { createDMessage, DConversationId, DMessageUserFlag, getConversation, messageToggleUserFlag, useChatStore } from '~/common/state/store-chats';
 import { useBrowserTranslationWarning } from '~/common/components/useIsBrowserTranslating';
 import { useCapabilityElevenLabs } from '~/common/components/useCapabilities';
 import { useEphemerals } from '~/common/chats/EphemeralsStore';
@@ -20,6 +20,7 @@ import { ChatMessage, ChatMessageMemo } from './message/ChatMessage';
 import { CleanerMessage, MessagesSelectionHeader } from './message/CleanerMessage';
 import { Ephemerals } from './Ephemerals';
 import { PersonaSelector } from './persona-selector/PersonaSelector';
+import { _executeConversationGenerateText, _executeConversationImagineText } from '../editors/_executeConversation';
 import { useChatShowSystemMessages } from '../store-app-chat';
 
 
@@ -34,9 +35,7 @@ export function ChatMessageList(props: {
   fitScreen: boolean,
   isMessageSelectionMode: boolean,
   onConversationBranch: (conversationId: DConversationId, messageId: string) => void,
-  onConversationExecuteHistory: (conversationId: DConversationId, history: DMessage[]) => Promise<void>,
   onTextDiagram: (diagramConfig: DiagramConfig | null) => void,
-  onTextImagine: (conversationId: DConversationId, selectedText: string) => Promise<void>,
   onTextSpeak: (selectedText: string) => Promise<void>,
   setIsMessageSelectionMode: (isMessageSelectionMode: boolean) => void,
   sx?: SxProps,
@@ -66,25 +65,25 @@ export function ChatMessageList(props: {
   const { mayWork: isSpeakable } = useCapabilityElevenLabs();
 
   // derived state
-  const { conversationId, capabilityHasT2I, onConversationBranch, onConversationExecuteHistory, onTextDiagram, onTextImagine, onTextSpeak } = props;
+  const { conversationId, capabilityHasT2I, onConversationBranch, onTextDiagram, onTextSpeak } = props;
 
 
   // text actions
 
   const handleRunExample = React.useCallback(async (examplePrompt: string) => {
-    conversationId && await onConversationExecuteHistory(conversationId, [...conversationMessages, createDMessage('user', examplePrompt)]);
-  }, [conversationId, conversationMessages, onConversationExecuteHistory]);
+    conversationId && await _executeConversationGenerateText(conversationId, [...conversationMessages, createDMessage('user', examplePrompt)]);
+  }, [conversationId, conversationMessages]);
 
 
   // message menu methods proxy
 
   const handleMessageAssistantFrom = React.useCallback(async (messageId: string, offset: number) => {
-    const messages = getConversation(conversationId)?.messages;
-    if (messages) {
-      const truncatedHistory = messages.slice(0, messages.findIndex(m => m.id === messageId) + offset + 1);
-      conversationId && await onConversationExecuteHistory(conversationId, truncatedHistory);
+    const history = getConversation(conversationId)?.messages;
+    if (conversationId && history) {
+      const truncatedHistory = history.slice(0, history.findIndex(m => m.id === messageId) + offset + 1);
+      await _executeConversationGenerateText(conversationId, truncatedHistory);
     }
-  }, [conversationId, onConversationExecuteHistory]);
+  }, [conversationId]);
 
   const handleMessageBeam = React.useCallback(async (messageId: string) => {
     // Right-click menu Beam
@@ -149,10 +148,10 @@ export function ChatMessageList(props: {
       return openPreferencesTab(PreferencesTab.Draw);
     if (conversationId) {
       setIsImagining(true);
-      await onTextImagine(conversationId, text);
+      await _executeConversationImagineText(conversationId, text);
       setIsImagining(false);
     }
-  }, [capabilityHasT2I, conversationId, onTextImagine, openPreferencesTab]);
+  }, [capabilityHasT2I, conversationId, openPreferencesTab]);
 
   const handleTextSpeak = React.useCallback(async (text: string) => {
     if (!isSpeakable)

@@ -1,7 +1,8 @@
 import { getChatLLMId } from '~/modules/llms/store-llms';
+import { imaginePromptFromText } from '~/modules/aifn/imagine/imaginePromptFromText';
 
 import { ConversationsManager } from '~/common/chats/ConversationsManager';
-import { createDMessage, DConversationId, DMessage, getConversationSystemPurposeId } from '~/common/state/store-chats';
+import { createDMessage, DConversationId, DMessage, getConversation, getConversationSystemPurposeId } from '~/common/state/store-chats';
 import { getUXLabsHighPerformance } from '~/common/state/store-ux-labs';
 
 import { extractChatCommand, findAllChatCommands } from '../commands/commands.registry';
@@ -15,7 +16,25 @@ import { runReActUpdatingState } from './react-tangent';
 import type { ChatModeId } from '../AppChat';
 
 
-export async function _handleExecute(chatModeId: ChatModeId, conversationId: DConversationId, history: DMessage[]): Promise<void> {
+export async function _executeConversationGenerateText(conversationId: DConversationId, newHistory: DMessage[]): Promise<void> {
+  await _executeState('generate-text', conversationId, newHistory);
+}
+
+async function _executeConversationGenerageImage(conversationId: DConversationId, history: DMessage[]): Promise<void> {
+  await _executeState('generate-image', conversationId, history);
+}
+
+export async function _executeConversationImagineText(conversationId: DConversationId, messageText: string): Promise<void> {
+  const history = getConversation(conversationId)?.messages;
+  if (history) {
+    const imaginedPrompt = await imaginePromptFromText(messageText) || 'An error sign.';
+    const imaginedPromptMessage = createDMessage('user', imaginedPrompt);
+    return await _executeConversationGenerageImage(conversationId, [...history, imaginedPromptMessage]);
+  }
+}
+
+
+export async function _executeState(chatModeId: ChatModeId, conversationId: DConversationId, history: DMessage[]): Promise<void> {
   const chatLLMId = getChatLLMId();
   if (!chatModeId || !conversationId || !chatLLMId) return;
 
